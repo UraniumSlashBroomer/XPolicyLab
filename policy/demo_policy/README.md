@@ -2,7 +2,7 @@
 
 **Contributor:** RoboDojo Team | **Paper:** Not applicable — XPolicyLab demo adapter | **arXiv:** Not applicable | **Original code:** Not applicable
 
-`demo_policy` is the minimal reference adapter for checking policy-server / environment-client wiring. It returns zero actions with the correct action keys and dimensions; it does not train a real model or load a checkpoint. `process_data.sh` and `train.sh` are stubs that only demonstrate the standard naming conventions.
+`demo_policy` is the minimal reference adapter for checking policy-server / environment-client wiring. It repeats the latest observed robot state as a no-op action chunk with the correct keys and dimensions; it does not train a real model or load a checkpoint. `process_data.sh` and `train.sh` are stubs that only demonstrate the standard naming conventions.
 
 Shared conventions — argument meanings, checkpoint naming, split-machine deployment, `EVAL_ENV_TYPE` — are documented in the [XPolicyLab README](../../README.md). Official results: [RoboDojo LeaderBoard](https://robodojo-benchmark.com/LeaderBoard).
 

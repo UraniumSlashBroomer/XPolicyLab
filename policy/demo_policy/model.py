@@ -5,94 +5,113 @@ from XPolicyLab.utils.process_data import get_robot_action_dim_info, get_batch_s
 
 class Model(ModelTemplate):
     def __init__(self, model_cfg):
-        # Store the configuration
         self.model_cfg = model_cfg
         self.action_type = model_cfg["action_type"]
         self.env_cfg_type = model_cfg["env_cfg_type"]
-
-        self.action_dim = get_action_dim(self.env_cfg_type) # get the total dim of the action
-
-        # Get robot action dimension metadata
-        # Example:
-        # {
-        #     "arm_dim": [7] or [7, 7],
-        #     "ee_dim": [1] or [1, 1]
-        # }
+        self.action_dim = get_action_dim(self.env_cfg_type)
         self.robot_action_dim_info = get_robot_action_dim_info(self.env_cfg_type)
         self.batch_size = get_batch_size(self.env_cfg_type)
+        self.latest_obs = None
+        self.latest_obs_batch = None
 
-        # The number of arm and EE entries must match, e.g. both are 2 for dual-arm robots
-        assert len(self.robot_action_dim_info["arm_dim"]) == len(self.robot_action_dim_info["ee_dim"]), \
-            "Arm and EE action dimensions must match"
+        assert len(self.robot_action_dim_info["arm_dim"]) == len(
+            self.robot_action_dim_info["ee_dim"]
+        ), "Arm and EE action dimensions must match"
+        if self.action_type not in {"joint", "ee"}:
+            raise ValueError("action_type must be 'joint' or 'ee'")
 
         print(f"[Model] Model successfully initialized with action type: {self.action_type}")
 
     def update_obs(self, obs):
-        # Update a single observation here if needed
+        self.latest_obs = obs
         print("[Model] Received observation")
-        pass
 
     def update_obs_batch(self, obs_list):
-        # Update a batch of observations here if needed
+        self.latest_obs_batch = list(obs_list)
         print(f"[Model] Received observation batch of size: {len(obs_list)}")
-        pass
 
     def get_action(self):
-        # Select action keys from the arm count and action type
-        num_arms = len(self.robot_action_dim_info["arm_dim"])
-
-        if num_arms == 1:  # single arm
-            arm_keys = ["arm_joint_state"] if self.action_type == "joint" else ["ee_pose"]
-            ee_keys = ["ee_joint_state"]
-
-        elif num_arms == 2:  # dual arm
-            arm_keys = ["left_arm_joint_state", "right_arm_joint_state"] if self.action_type == "joint" else ["left_ee_pose", "right_ee_pose"]
-            ee_keys = ["left_ee_joint_state", "right_ee_joint_state"]
-
-        else:
-            raise NotImplementedError(f"Unsupported number of arms: {num_arms}")
-
-        steps = 2  # current exampleonlygenerate 2 action, by
-        action_list = []
-
-        for _ in range(steps):
-            action_dict = {}
-
-            for i, (arm_key, ee_key) in enumerate(zip(arm_keys, ee_keys)):
-                # Arm action
-                # joint mode: dimensions are determined by arm_dim
-                # ee mode: defaults to a 7-D pose [x, y, z, qw, qx, qy, qz]
-                if self.action_type == "joint":
-                    action_dict[arm_key] = np.zeros(
-                        self.robot_action_dim_info["arm_dim"][i],
-                        dtype=np.float32,
-                    )
-                else:
-                    action_dict[arm_key] = np.array(
-                        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-                        dtype=np.float32,
-                    )
-
-                # Gripper / end-effector joint action
-                action_dict[ee_key] = np.zeros(
-                    self.robot_action_dim_info["ee_dim"][i],
-                    dtype=np.float32,
-                )
-
-            action_list.append(action_dict)
-
+        if self.latest_obs is None:
+            raise RuntimeError("update_obs must be called before get_action")
+        action_list = self._actions_for_observation(self.latest_obs)
         print("[Model] Generated action")
         return action_list
 
     def get_action_batch(self, env_idx_list=None):
-        # Batch size follows the running environment index list; fall back to the env_cfg default batch_size when omitted
-        batch_size = len(env_idx_list) if env_idx_list is not None else self.batch_size
-        action_batch = [self.get_action() for _ in range(batch_size)]
-
-        print(f"[Model] Generated action batch of size: {batch_size}")
+        if self.latest_obs_batch is None:
+            raise RuntimeError(
+                "update_obs_batch must be called before get_action_batch"
+            )
+        expected_size = (
+            len(env_idx_list) if env_idx_list is not None else self.batch_size
+        )
+        if len(self.latest_obs_batch) != expected_size:
+            raise ValueError(
+                "Observation batch size does not match the requested environment batch."
+            )
+        action_batch = [
+            self._actions_for_observation(obs) for obs in self.latest_obs_batch
+        ]
+        print(f"[Model] Generated action batch of size: {expected_size}")
         return action_batch
 
     def reset(self):
-        # Reset model state here if it has internal state, such as an RNN hidden state
+        self.latest_obs = None
+        self.latest_obs_batch = None
         print("[Model] Model successfully reset")
-        pass
+
+    def _actions_for_observation(self, obs):
+        state = obs.get("state")
+        if not isinstance(state, dict):
+            raise ValueError("Observation must contain a state dictionary.")
+
+        arm_keys, ee_keys = self._action_keys()
+        action = {}
+        for index, (arm_key, ee_key) in enumerate(zip(arm_keys, ee_keys)):
+            arm_dim = (
+                self.robot_action_dim_info["arm_dim"][index]
+                if self.action_type == "joint"
+                else 7
+            )
+            action[arm_key] = self._state_vector(state, arm_key, arm_dim)
+            action[ee_key] = self._state_vector(
+                state,
+                ee_key,
+                self.robot_action_dim_info["ee_dim"][index],
+            )
+        return [
+            {key: value.copy() for key, value in action.items()}
+            for _ in range(2)
+        ]
+
+    def _action_keys(self):
+        num_arms = len(self.robot_action_dim_info["arm_dim"])
+        if num_arms == 1:
+            arm_keys = [
+                "arm_joint_state" if self.action_type == "joint" else "ee_pose"
+            ]
+            return arm_keys, ["ee_joint_state"]
+        if num_arms == 2:
+            prefix = ("left", "right")
+            arm_suffix = (
+                "arm_joint_state" if self.action_type == "joint" else "ee_pose"
+            )
+            return (
+                [f"{side}_{arm_suffix}" for side in prefix],
+                [f"{side}_ee_joint_state" for side in prefix],
+            )
+        raise NotImplementedError(f"Unsupported number of arms: {num_arms}")
+
+    @staticmethod
+    def _state_vector(state, key, expected_dim):
+        if key not in state:
+            raise KeyError(f"Observation state is missing {key!r}.")
+        value = np.asarray(state[key], dtype=np.float32)
+        if value.shape != (expected_dim,):
+            raise ValueError(
+                f"Observation state {key!r} must have shape ({expected_dim},), "
+                f"got {value.shape}."
+            )
+        if not np.all(np.isfinite(value)):
+            raise ValueError(f"Observation state {key!r} must be finite.")
+        return value.copy()
